@@ -38,7 +38,7 @@ python3 download_trailcam.py --output ~/TrailCam --headless
 
 ## Example output
 
-<video src="example.webm" controls width="100%"></video>
+[Download example timelapse (WebM)](https://github.com/captainmustard/stealthcam-downloader/releases/download/v1.0/example.webm)
 
 ## Output
 
