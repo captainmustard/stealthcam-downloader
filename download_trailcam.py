@@ -38,17 +38,16 @@ import urllib.request
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
 
-def download_file(url: str, dest: Path, headers: dict | None = None) -> bool:
-    """Download a single file synchronously; returns True on success."""
+async def download_file(url: str, dest: Path, client=None, headers: dict | None = None) -> bool:
+    """Download a single file; returns True on success."""
     try:
-        if httpx:
-            with httpx.Client(follow_redirects=True, timeout=60) as client:
-                resp = client.get(url, headers=headers or {})
-                resp.raise_for_status()
-                dest.write_bytes(resp.content)
+        if client:
+            resp = await client.get(url, headers=headers or {})
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
         else:
             req = urllib.request.Request(url, headers=headers or {})
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with await asyncio.to_thread(urllib.request.urlopen, req, 60) as r:
                 dest.write_bytes(r.read())
         return True
     except Exception as e:
@@ -161,23 +160,23 @@ async def scrape_gallery(page: Page, image_urls: set):
         if looks_like_photo(src):
             image_urls.add(src)
 
-async def download_worker(semaphore, url, dest, filename, index, total, seen_stems, stem_key_fn, lock):
+async def download_worker(semaphore, url, dest, filename, index, total, client, seen_stems, stem_key_fn, lock):
     async with semaphore:
         key = stem_key_fn(filename)
-        # Check for a race where another worker already downloaded the same stem
         async with lock:
             if key in seen_stems:
                 print(f"  [{index}/{total}] skip (duplicate): {filename}")
-                return True
+                return "skipped"
             seen_stems.add(key)
 
-        success = await asyncio.to_thread(download_file, url, dest)
+        success = await download_file(url, dest, client)
         if success:
-            print(f"  [{index}/{total}] {filename}")
+            print(f"  [{index}/{total}] Downloaded: {filename}")
+            return "downloaded"
         else:
             async with lock:
                 seen_stems.discard(key)
-        return success
+            return "failed"
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -187,7 +186,7 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
 
     image_urls: set[str] = set()
     api_responses: list[dict] = []
-    success = False  # guard against unhandled exception before assignment
+    success = False
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
@@ -228,44 +227,52 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
 
     # Process and download images concurrently
     photo_urls = sorted([u for u in image_urls if looks_like_photo(u)])
-    total = len(photo_urls)
-    print(f"[*] Found {total} image URL(s). Downloading to {output_dir} …")
+    total_photos = len(photo_urls)
+    print(f"[*] Found {total_photos} image URL(s). Downloading to {output_dir} …")
 
     def stem_key(name: str) -> str:
         s = Path(name).stem
         return s.split("_", 1)[-1] if "_" in s else s
 
     seen_stems: set[str] = {stem_key(f.name) for f in output_dir.iterdir() if f.is_file()}
-    lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(10)
+    lock = asyncio.Lock()
     tasks = []
     skipped = 0
 
-    for i, url in enumerate(photo_urls, 1):
-        filename = url_to_filename(url, i)
-        dest = output_dir / filename
-        key = stem_key(filename)
+    client_cm = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
 
-        if dest.exists() or key in seen_stems:
-            print(f"  [{i}/{total}] skip (duplicate): {filename}")
-            seen_stems.add(key)
-            skipped += 1
-            continue
+    async with (client_cm or _null_context()) as client:
+        for i, url in enumerate(photo_urls, 1):
+            filename = url_to_filename(url, i)
+            dest = output_dir / filename
+            key = stem_key(filename)
 
-        tasks.append(download_worker(semaphore, url, dest, filename, i, total, seen_stems, stem_key, lock))
+            if dest.exists() or key in seen_stems:
+                print(f"  [{i}/{total_photos}] skip (duplicate): {filename}")
+                seen_stems.add(key)
+                skipped += 1
+                continue
 
-    downloaded = fail = 0
-    if tasks:
-        results = await asyncio.gather(*tasks)
-        downloaded = sum(results)
-        fail = len(results) - downloaded
+            tasks.append(download_worker(semaphore, url, dest, filename, i, total_photos, client, seen_stems, stem_key, lock))
 
-    print(f"\n[done] {downloaded} downloaded, {skipped} skipped, {fail} failed.")
+        results = await asyncio.gather(*tasks) if tasks else []
+
+    ok = results.count("downloaded")
+    skipped += results.count("skipped")
+    fail = results.count("failed")
+
+    print(f"\n[done] {ok} downloaded, {skipped} skipped, {fail} failed.")
     if fail:
         print("        Check _api_responses.json for raw API data if images are missing.")
 
-    # Build WebM
     make_webm(output_dir, fps=3)
+
+
+class _null_context:
+    """Async context manager that yields None (stands in when httpx is unavailable)."""
+    async def __aenter__(self): return None
+    async def __aexit__(self, *_): pass
 
 
 def make_webm(output_dir: Path, fps: int = 3):
@@ -289,7 +296,8 @@ def make_webm(output_dir: Path, fps: int = 3):
 
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as flist:
         for p in frame_paths:
-            flist.write(f"file '{p.resolve()}'\n")
+            safe_path = str(p.resolve()).replace("'", "'\\''")
+            flist.write(f"file '{safe_path}'\n")
             flist.write(f"duration {1/fps:.6f}\n")
         flist_path = flist.name
 
