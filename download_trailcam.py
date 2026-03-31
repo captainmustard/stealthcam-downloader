@@ -283,10 +283,10 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
     if fail:
         print("        Check _api_responses.json for raw API data if images are missing.")
 
-    make_webm(output_dir, fps=3)
+    make_mp4(output_dir, fps=3)
 
 
-def make_webm(output_dir: Path, fps: int = 3):
+def make_mp4(output_dir: Path, fps: int = 3):
     import subprocess
     import tempfile
 
@@ -303,7 +303,7 @@ def make_webm(output_dir: Path, fps: int = 3):
         print("[!] No images found for WebM.")
         return
 
-    print(f"[*] Building WebM from {len(frame_paths)} frame(s) at {fps} fps …")
+    print(f"[*] Building MP4 from {len(frame_paths)} frame(s) at {fps} fps …")
 
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as flist:
         for p in frame_paths:
@@ -312,13 +312,13 @@ def make_webm(output_dir: Path, fps: int = 3):
             flist.write(f"duration {1/fps:.6f}\n")
         flist_path = flist.name
 
-    webm_path = output_dir / "trailcam.webm"
+    mp4_path = output_dir / "trailcam.mp4"
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0", "-i", flist_path,
         "-vf", "scale=1280:-2",
-        "-c:v", "libvpx-vp9", "-crf", "33", "-b:v", "0",
-        str(webm_path),
+        "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p",
+        str(mp4_path),
     ]
 
     try:
@@ -330,8 +330,8 @@ def make_webm(output_dir: Path, fps: int = 3):
         print(f"[!] ffmpeg failed:\n{result.stderr}")
         return
 
-    size_mb = webm_path.stat().st_size / 1_048_576
-    print(f"[*] Saved {webm_path} ({size_mb:.1f} MB)")
+    size_mb = mp4_path.stat().st_size / 1_048_576
+    print(f"[*] Saved {mp4_path} ({size_mb:.1f} MB)")
 
 
 # ── utilities ─────────────────────────────────────────────────────────────────

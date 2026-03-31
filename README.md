@@ -1,6 +1,6 @@
 # stealthcam-downloader
 
-Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.com) trail camera gallery and assembles them into a WebM timelapse.
+Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.com) trail camera gallery and assembles them into an MP4 timelapse.
 
 ## Requirements
 
@@ -38,12 +38,12 @@ python3 download_trailcam.py --output ~/TrailCam --headless
 
 ## Example output
 
-[Example timelapse (WebM)](https://files.catbox.moe/2lfxdm.webm)
+[Example timelapse (MP4)](https://files.catbox.moe/2lfxdm.webm)
 
 ## Output
 
 - `trailcam_photos/*.JPG` — full-resolution photos, named by capture order
-- `trailcam_photos/trailcam.webm` — VP9 WebM timelapse at 3 fps, max 1280px wide
+- `trailcam_photos/trailcam.mp4` — H.264 MP4 timelapse at 3 fps, max 1280px wide
 - `trailcam_photos/_api_responses.json` — raw API responses (useful for debugging)
 
 Re-running is safe: already-downloaded photos are skipped, and the WebM is rebuilt from everything in the folder.
