@@ -36,10 +36,6 @@ You'll be prompted for your Stealth Cam Command email and password.
 python3 download_trailcam.py --output ~/TrailCam --headless
 ```
 
-## Example output
-
-[Download example timelapse (WebM)](https://github.com/captainmustard/stealthcam-downloader/releases/download/v1.0/example.webm)
-
 ## Output
 
 - `trailcam_photos/*.JPG` — full-resolution photos, named by capture order
