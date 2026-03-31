@@ -36,6 +36,10 @@ You'll be prompted for your Stealth Cam Command email and password.
 python3 download_trailcam.py --output ~/TrailCam --headless
 ```
 
+## Example output
+
+<video src="https://files.catbox.moe/2lfxdm.webm" controls width="100%"></video>
+
 ## Output
 
 - `trailcam_photos/*.JPG` — full-resolution photos, named by capture order
