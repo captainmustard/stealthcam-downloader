@@ -39,16 +39,24 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
 
 async def download_file(url: str, dest: Path, client=None, headers: dict | None = None) -> bool:
-    """Download a single file; returns True on success."""
+    """Download a single file asynchronously; returns True on success."""
     try:
         if client:
             resp = await client.get(url, headers=headers or {})
             resp.raise_for_status()
             dest.write_bytes(resp.content)
+        elif httpx:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=60) as temp_client:
+                resp = await temp_client.get(url, headers=headers or {})
+                resp.raise_for_status()
+                dest.write_bytes(resp.content)
         else:
-            req = urllib.request.Request(url, headers=headers or {})
-            with await asyncio.to_thread(urllib.request.urlopen, req, 60) as r:
-                dest.write_bytes(r.read())
+            # Fallback for systems without httpx; wrap blocking urllib in to_thread
+            def _urllib_download():
+                req = urllib.request.Request(url, headers=headers or {})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    dest.write_bytes(r.read())
+            await asyncio.to_thread(_urllib_download)
         return True
     except Exception as e:
         print(f"  [!] Failed to download {url}: {e}")
@@ -161,6 +169,7 @@ async def scrape_gallery(page: Page, image_urls: set):
             image_urls.add(src)
 
 async def download_worker(semaphore, url, dest, filename, index, total, client, seen_stems, stem_key_fn, lock):
+    """Wrapper to run the download function concurrently."""
     async with semaphore:
         key = stem_key_fn(filename)
         async with lock:
@@ -186,7 +195,7 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
 
     image_urls: set[str] = set()
     api_responses: list[dict] = []
-    success = False
+    success = False  # guard if exception fires before login()
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
@@ -235,14 +244,19 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
         return s.split("_", 1)[-1] if "_" in s else s
 
     seen_stems: set[str] = {stem_key(f.name) for f in output_dir.iterdir() if f.is_file()}
+
+    tasks = []
     semaphore = asyncio.Semaphore(10)
     lock = asyncio.Lock()
-    tasks = []
+
+    # Enable connection pooling by sharing one async client instance
+    client = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
+
+    ok = 0
     skipped = 0
+    fail = 0
 
-    client_cm = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
-
-    async with (client_cm or _null_context()) as client:
+    try:
         for i, url in enumerate(photo_urls, 1):
             filename = url_to_filename(url, i)
             dest = output_dir / filename
@@ -250,29 +264,26 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
 
             if dest.exists() or key in seen_stems:
                 print(f"  [{i}/{total_photos}] skip (duplicate): {filename}")
-                seen_stems.add(key)
                 skipped += 1
+                seen_stems.add(key)
                 continue
 
             tasks.append(download_worker(semaphore, url, dest, filename, i, total_photos, client, seen_stems, stem_key, lock))
 
-        results = await asyncio.gather(*tasks) if tasks else []
-
-    ok = results.count("downloaded")
-    skipped += results.count("skipped")
-    fail = results.count("failed")
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            ok += results.count("downloaded")
+            skipped += results.count("skipped")
+            fail += results.count("failed")
+    finally:
+        if client:
+            await client.aclose()
 
     print(f"\n[done] {ok} downloaded, {skipped} skipped, {fail} failed.")
     if fail:
         print("        Check _api_responses.json for raw API data if images are missing.")
 
     make_webm(output_dir, fps=3)
-
-
-class _null_context:
-    """Async context manager that yields None (stands in when httpx is unavailable)."""
-    async def __aenter__(self): return None
-    async def __aexit__(self, *_): pass
 
 
 def make_webm(output_dir: Path, fps: int = 3):
