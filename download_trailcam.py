@@ -4,6 +4,9 @@ Trail cam gallery downloader for stealthcamcommand.com
 Usage:
     python3 download_trailcam.py
     python3 download_trailcam.py --output ~/TrailCam --headless
+    python3 download_trailcam.py --novideo
+    python3 download_trailcam.py --format gif
+    python3 download_trailcam.py --keep-old
 """
 
 import asyncio
@@ -15,6 +18,7 @@ import re
 import sys
 import shutil
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -204,8 +208,11 @@ async def download_worker(semaphore, url, dest, filename, index, total, client, 
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-async def run(email: str, password: str, output_dir: Path, headless: bool):
+async def run(email: str, password: str, output_dir: Path, headless: bool,
+              novideo: bool, fmt: str, keep_old: bool):
     output_dir.mkdir(parents=True, exist_ok=True)
+    photos_dir = output_dir / "photos"
+    photos_dir.mkdir(exist_ok=True)
 
     image_urls: set[str] = set()
     api_responses: list[dict] = []
@@ -248,22 +255,21 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
     api_log.write_text(json.dumps(api_responses, indent=2, default=str))
     print(f"[*] Saved {len(api_responses)} API response(s) to {api_log}")
 
-    # Process and download images concurrently
+    # Process and download images concurrently into photos_dir
     photo_urls = sorted([u for u in image_urls if looks_like_photo(u)])
     total_photos = len(photo_urls)
-    print(f"[*] Found {total_photos} image URL(s). Downloading to {output_dir} …")
+    print(f"[*] Found {total_photos} image URL(s). Downloading to {photos_dir} …")
 
     def stem_key(name: str) -> str:
         s = Path(name).stem
         return s.split("_", 1)[-1] if "_" in s else s
 
-    seen_stems: set[str] = {stem_key(f.name) for f in output_dir.iterdir() if f.is_file()}
+    seen_stems: set[str] = {stem_key(f.name) for f in photos_dir.iterdir() if f.is_file()}
 
     tasks = []
     semaphore = asyncio.Semaphore(10)
     lock = asyncio.Lock()
 
-    # Enable connection pooling by sharing one async client instance
     client = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
 
     ok = 0
@@ -273,7 +279,7 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
     try:
         for i, url in enumerate(photo_urls, 1):
             filename = url_to_filename(url, i)
-            dest = output_dir / filename
+            dest = photos_dir / filename
             key = stem_key(filename)
 
             if dest.exists() or key in seen_stems:
@@ -297,34 +303,97 @@ async def run(email: str, password: str, output_dir: Path, headless: bool):
     if fail:
         print("        Check _api_responses.json for raw API data if images are missing.")
 
-    make_mp4(output_dir, fps=3)
+    if not novideo:
+        make_video(photos_dir, output_dir, fmt=fmt, fps=3, keep_old=keep_old)
 
 
-def make_mp4(output_dir: Path, fps: int = 3):
+# ── video export ──────────────────────────────────────────────────────────────
+
+PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+def frame_sort_key(p: Path) -> str:
+    """Sort by UUID stem (strips leading NNNN_ index), which is time-based."""
+    s = p.stem
+    return s.split("_", 1)[-1] if "_" in s else s
+
+def get_frame_paths(photos_dir: Path) -> list[Path]:
+    return sorted(
+        (f for f in photos_dir.iterdir()
+         if f.suffix.lower() in PHOTO_EXTS and not f.name.startswith("_")),
+        key=frame_sort_key,
+    )
+
+def archive_existing(path: Path):
+    """Rename an existing output file with a timestamp so it isn't overwritten."""
+    if path.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archived = path.with_stem(f"{path.stem}_{ts}")
+        path.rename(archived)
+        print(f"[*] Archived old video to {archived.name}")
+
+def make_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool):
+    if fmt == "gif":
+        make_gif(photos_dir, output_dir, fps=fps, keep_old=keep_old)
+    else:
+        make_ffmpeg_video(photos_dir, output_dir, fmt=fmt, fps=fps, keep_old=keep_old)
+
+def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool):
+    try:
+        from PIL import Image
+    except ImportError:
+        print("[!] Pillow not installed. Run: pip install pillow")
+        return
+
+    frame_paths = get_frame_paths(photos_dir)
+    if not frame_paths:
+        print("[!] No images found for GIF.")
+        return
+
+    print(f"[*] Building GIF from {len(frame_paths)} frame(s) at {fps} fps …")
+    duration_ms = 1000 // fps
+
+    frames = []
+    for p in frame_paths:
+        try:
+            img = Image.open(p).convert("RGB")
+            img.thumbnail((1280, 960), Image.LANCZOS)
+            frames.append(img)
+        except Exception as e:
+            print(f"  [!] Skipping {p.name}: {e}")
+
+    if not frames:
+        print("[!] No frames could be loaded.")
+        return
+
+    gif_path = output_dir / "trailcam.gif"
+    if keep_old:
+        archive_existing(gif_path)
+
+    frames[0].save(
+        gif_path,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    size_mb = gif_path.stat().st_size / 1_048_576
+    print(f"[*] Saved {gif_path} ({size_mb:.1f} MB)")
+
+def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool):
     import subprocess
     import tempfile
 
     if not shutil.which("ffmpeg"):
-        print("[!] FFmpeg is not installed or not in PATH. Skipping WebM generation.")
+        print("[!] ffmpeg not found. Install it or use --novideo.")
         return
 
-    photo_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
-    def frame_sort_key(p: Path) -> str:
-        # Sort by the UUID stem (strip leading NNNN_ index), which is time-based
-        s = p.stem
-        return s.split("_", 1)[-1] if "_" in s else s
-
-    frame_paths = sorted(
-        (f for f in output_dir.iterdir()
-         if f.suffix.lower() in photo_exts and not f.name.startswith("_")),
-        key=frame_sort_key,
-    )
+    frame_paths = get_frame_paths(photos_dir)
     if not frame_paths:
-        print("[!] No images found for WebM.")
+        print("[!] No images found for video.")
         return
 
-    print(f"[*] Building MP4 from {len(frame_paths)} frame(s) at {fps} fps …")
+    print(f"[*] Building {fmt.upper()} from {len(frame_paths)} frame(s) at {fps} fps …")
 
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as flist:
         for p in frame_paths:
@@ -333,13 +402,21 @@ def make_mp4(output_dir: Path, fps: int = 3):
             flist.write(f"duration {1/fps:.6f}\n")
         flist_path = flist.name
 
-    mp4_path = output_dir / "trailcam.mp4"
+    out_path = output_dir / f"trailcam.{fmt}"
+    if keep_old:
+        archive_existing(out_path)
+
+    if fmt == "mp4":
+        codec_args = ["-c:v", "libx264", "-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    else:  # webm
+        codec_args = ["-c:v", "libvpx-vp9", "-crf", "33", "-b:v", "0"]
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0", "-i", flist_path,
         "-vf", "scale=1280:-2",
-        "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p",
-        str(mp4_path),
+        *codec_args,
+        str(out_path),
     ]
 
     try:
@@ -351,8 +428,8 @@ def make_mp4(output_dir: Path, fps: int = 3):
         print(f"[!] ffmpeg failed:\n{result.stderr}")
         return
 
-    size_mb = mp4_path.stat().st_size / 1_048_576
-    print(f"[*] Saved {mp4_path} ({size_mb:.1f} MB)")
+    size_mb = out_path.stat().st_size / 1_048_576
+    print(f"[*] Saved {out_path} ({size_mb:.1f} MB)")
 
 
 # ── utilities ─────────────────────────────────────────────────────────────────
@@ -394,12 +471,18 @@ def extract_urls_from_json(obj, found: set, depth: int = 0):
 
 def main():
     parser = argparse.ArgumentParser(description="Download trail cam photos from stealthcamcommand.com")
-    parser.add_argument("--email",    help="Account email (prompted if omitted)")
-    parser.add_argument("--password", help="Account password (prompted if omitted)")
-    parser.add_argument("--output",   default="./trailcam_photos",
+    parser.add_argument("--email",     help="Account email (prompted if omitted)")
+    parser.add_argument("--password",  help="Account password (prompted if omitted)")
+    parser.add_argument("--output",    default="./trailcam_photos",
                         help="Destination folder (default: ./trailcam_photos)")
-    parser.add_argument("--headless", action="store_true",
+    parser.add_argument("--headless",  action="store_true",
                         help="Run browser in headless mode (no window)")
+    parser.add_argument("--novideo",   action="store_true",
+                        help="Skip video creation")
+    parser.add_argument("--format",    choices=["mp4", "webm", "gif"], default="mp4",
+                        help="Output video format (default: mp4)")
+    parser.add_argument("--keep-old",  action="store_true",
+                        help="Archive existing video with a timestamp instead of overwriting it")
     args = parser.parse_args()
 
     email    = args.email    or input("Email: ")
@@ -410,6 +493,9 @@ def main():
         password=password,
         output_dir=Path(args.output).expanduser(),
         headless=args.headless,
+        novideo=args.novideo,
+        fmt=args.format,
+        keep_old=args.keep_old,
     ))
 
 

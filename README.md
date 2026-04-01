@@ -1,6 +1,6 @@
 # stealthcam-downloader
 
-Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.com) trail camera gallery and assembles them into an MP4 timelapse.
+Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.com) trail camera gallery and assembles them into a timelapse video.
 
 ## Requirements
 
@@ -25,15 +25,18 @@ You'll be prompted for your Stealth Cam Command email and password.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--output PATH` | `./trailcam_photos` | Folder to save photos and video |
+| `--output PATH` | `./trailcam_photos` | Destination folder |
 | `--headless` | off | Run browser without a visible window |
 | `--email EMAIL` | (prompt) | Account email |
 | `--password PASS` | (prompt) | Account password |
+| `--novideo` | off | Skip video creation |
+| `--format FORMAT` | `mp4` | Video format: `mp4`, `webm`, or `gif` |
+| `--keep-old` | off | Archive existing video with a timestamp instead of overwriting |
 
 ### Example
 
 ```bash
-python3 download_trailcam.py --output ~/TrailCam --headless
+python3 download_trailcam.py --output ~/TrailCam --headless --format mp4 --keep-old
 ```
 
 ## Example output
@@ -42,8 +45,13 @@ python3 download_trailcam.py --output ~/TrailCam --headless
 
 ## Output
 
-- `trailcam_photos/*.JPG` — full-resolution photos, named by capture order
-- `trailcam_photos/trailcam.mp4` — H.264 MP4 timelapse at 3 fps, max 1280px wide
-- `trailcam_photos/_api_responses.json` — raw API responses (useful for debugging)
+```
+trailcam_photos/
+├── photos/          # full-resolution photos, named by capture order
+│   ├── 0001_*.JPG
+│   └── ...
+├── trailcam.mp4     # timelapse at 3 fps, max 1280px wide
+└── _api_responses.json
+```
 
-Re-running is safe: already-downloaded photos are skipped, and the WebM is rebuilt from everything in the folder.
+Re-running is safe: already-downloaded photos are skipped, and the video is rebuilt from everything in the photos folder.
