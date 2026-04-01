@@ -209,99 +209,100 @@ async def download_worker(semaphore, url, dest, filename, index, total, client, 
 # ── main ─────────────────────────────────────────────────────────────────────
 
 async def run(email: str, password: str, output_dir: Path, headless: bool,
-              novideo: bool, fmt: str, keep_old: bool, smoothing: str | None):
+              novideo: bool, nophotos: bool, fmt: str, keep_old: bool, smoothing: str | None):
     output_dir.mkdir(parents=True, exist_ok=True)
     photos_dir = output_dir / "photos"
     photos_dir.mkdir(exist_ok=True)
 
-    image_urls: set[str] = set()
-    api_responses: list[dict] = []
-    success = False  # guard if exception fires before login()
+    if not nophotos:
+        image_urls: set[str] = set()
+        api_responses: list[dict] = []
+        success = False  # guard if exception fires before login()
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless)
-        context = await browser.new_context()
-        page = await context.new_page()
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=headless)
+            context = await browser.new_context()
+            page = await context.new_page()
 
-        async def on_response(response: Response):
-            url = response.url
-            ct = response.headers.get("content-type", "")
+            async def on_response(response: Response):
+                url = response.url
+                ct = response.headers.get("content-type", "")
 
-            if "json" in ct:
-                try:
-                    body = await response.json()
-                    api_responses.append({"url": url, "body": body})
-                    extract_urls_from_json(body, image_urls)
-                except Exception:
-                    pass
+                if "json" in ct:
+                    try:
+                        body = await response.json()
+                        api_responses.append({"url": url, "body": body})
+                        extract_urls_from_json(body, image_urls)
+                    except Exception:
+                        pass
 
-            if any(ct.startswith(t) for t in ("image/jpeg", "image/png", "image/webp", "image/gif")):
-                image_urls.add(url)
+                if any(ct.startswith(t) for t in ("image/jpeg", "image/png", "image/webp", "image/gif")):
+                    image_urls.add(url)
 
-        page.on("response", on_response)
+            page.on("response", on_response)
 
-        success = await login(page, email, password, output_dir)
-        if success:
-            await scrape_gallery(page, image_urls)
+            success = await login(page, email, password, output_dir)
+            if success:
+                await scrape_gallery(page, image_urls)
 
-        await browser.close()
+            await browser.close()
 
-    if not success:
-        print("[!] Aborting due to login failure.")
-        return
+        if not success:
+            print("[!] Aborting due to login failure.")
+            return
 
-    # Save API responses
-    api_log = output_dir / "_api_responses.json"
-    api_log.write_text(json.dumps(api_responses, indent=2, default=str))
-    print(f"[*] Saved {len(api_responses)} API response(s) to {api_log}")
+        # Save API responses
+        api_log = output_dir / "_api_responses.json"
+        api_log.write_text(json.dumps(api_responses, indent=2, default=str))
+        print(f"[*] Saved {len(api_responses)} API response(s) to {api_log}")
 
-    # Process and download images concurrently into photos_dir
-    photo_urls = sorted([u for u in image_urls if looks_like_photo(u)])
-    total_photos = len(photo_urls)
-    print(f"[*] Found {total_photos} image URL(s). Downloading to {photos_dir} …")
+        # Process and download images concurrently into photos_dir
+        photo_urls = sorted([u for u in image_urls if looks_like_photo(u)])
+        total_photos = len(photo_urls)
+        print(f"[*] Found {total_photos} image URL(s). Downloading to {photos_dir} …")
 
-    def stem_key(name: str) -> str:
-        s = Path(name).stem
-        return s.split("_", 1)[-1] if "_" in s else s
+        def stem_key(name: str) -> str:
+            s = Path(name).stem
+            return s.split("_", 1)[-1] if "_" in s else s
 
-    seen_stems: set[str] = {stem_key(f.name) for f in photos_dir.iterdir() if f.is_file()}
+        seen_stems: set[str] = {stem_key(f.name) for f in photos_dir.iterdir() if f.is_file()}
 
-    tasks = []
-    semaphore = asyncio.Semaphore(10)
-    lock = asyncio.Lock()
+        tasks = []
+        semaphore = asyncio.Semaphore(10)
+        lock = asyncio.Lock()
 
-    client = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
+        client = httpx.AsyncClient(follow_redirects=True, timeout=60) if httpx else None
 
-    ok = 0
-    skipped = 0
-    fail = 0
+        ok = 0
+        skipped = 0
+        fail = 0
 
-    try:
-        for i, url in enumerate(photo_urls, 1):
-            filename = url_to_filename(url, i)
-            dest = photos_dir / filename
-            key = stem_key(filename)
+        try:
+            for i, url in enumerate(photo_urls, 1):
+                filename = url_to_filename(url, i)
+                dest = photos_dir / filename
+                key = stem_key(filename)
 
-            if dest.exists() or key in seen_stems:
-                print(f"  [{i}/{total_photos}] skip (duplicate): {filename}")
-                skipped += 1
-                seen_stems.add(key)
-                continue
+                if dest.exists() or key in seen_stems:
+                    print(f"  [{i}/{total_photos}] skip (duplicate): {filename}")
+                    skipped += 1
+                    seen_stems.add(key)
+                    continue
 
-            tasks.append(download_worker(semaphore, url, dest, filename, i, total_photos, client, seen_stems, stem_key, lock))
+                tasks.append(download_worker(semaphore, url, dest, filename, i, total_photos, client, seen_stems, stem_key, lock))
 
-        if tasks:
-            results = await asyncio.gather(*tasks)
-            ok += results.count("downloaded")
-            skipped += results.count("skipped")
-            fail += results.count("failed")
-    finally:
-        if client:
-            await client.aclose()
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                ok += results.count("downloaded")
+                skipped += results.count("skipped")
+                fail += results.count("failed")
+        finally:
+            if client:
+                await client.aclose()
 
-    print(f"\n[done] {ok} downloaded, {skipped} skipped, {fail} failed.")
-    if fail:
-        print("        Check _api_responses.json for raw API data if images are missing.")
+        print(f"\n[done] {ok} downloaded, {skipped} skipped, {fail} failed.")
+        if fail:
+            print("        Check _api_responses.json for raw API data if images are missing.")
 
     if not novideo:
         make_video(photos_dir, output_dir, fmt=fmt, fps=3, keep_old=keep_old,
@@ -626,6 +627,8 @@ def main():
                         help="Run browser in headless mode (no window)")
     parser.add_argument("--novideo",   action="store_true",
                         help="Skip video creation")
+    parser.add_argument("--nophotos",  action="store_true",
+                        help="Skip downloading photos (useful for rebuilding video from existing photos)")
     parser.add_argument("--format",    choices=["mp4", "webm", "gif"], default="mp4",
                         help="Output video format (default: mp4)")
     parser.add_argument("--keep-old",  action="store_true",
@@ -645,6 +648,7 @@ def main():
         output_dir=Path(args.output).expanduser(),
         headless=args.headless,
         novideo=args.novideo,
+        nophotos=args.nophotos,
         fmt=args.format,
         keep_old=args.keep_old,
         smoothing=args.smoothing,
