@@ -209,7 +209,7 @@ async def download_worker(semaphore, url, dest, filename, index, total, client, 
 # ── main ─────────────────────────────────────────────────────────────────────
 
 async def run(email: str, password: str, output_dir: Path, headless: bool,
-              novideo: bool, fmt: str, keep_old: bool):
+              novideo: bool, fmt: str, keep_old: bool, optical_flow: bool):
     output_dir.mkdir(parents=True, exist_ok=True)
     photos_dir = output_dir / "photos"
     photos_dir.mkdir(exist_ok=True)
@@ -304,7 +304,8 @@ async def run(email: str, password: str, output_dir: Path, headless: bool,
         print("        Check _api_responses.json for raw API data if images are missing.")
 
     if not novideo:
-        make_video(photos_dir, output_dir, fmt=fmt, fps=3, keep_old=keep_old)
+        make_video(photos_dir, output_dir, fmt=fmt, fps=3, keep_old=keep_old,
+                   optical_flow=optical_flow)
 
 
 # ── video export ──────────────────────────────────────────────────────────────
@@ -323,6 +324,92 @@ def get_frame_paths(photos_dir: Path) -> list[Path]:
         key=frame_sort_key,
     )
 
+def uuid_timestamp_ms(stem: str) -> int | None:
+    """Extract millisecond timestamp from a UUID v7 stem (strips leading NNNN_ index)."""
+    uuid_part = stem.split("_", 1)[-1] if "_" in stem else stem
+    hex_str = uuid_part.replace("-", "")[:12]
+    try:
+        return int(hex_str, 16)
+    except ValueError:
+        return None
+
+def group_into_bursts(frame_paths: list[Path], gap_ms: int = 10_000) -> list[list[Path]]:
+    """Group consecutive frames into bursts; a new burst starts after a gap > gap_ms."""
+    if not frame_paths:
+        return []
+    bursts, current = [], [frame_paths[0]]
+    prev_ts = uuid_timestamp_ms(frame_paths[0].stem)
+    for p in frame_paths[1:]:
+        ts = uuid_timestamp_ms(p.stem)
+        if ts is None or prev_ts is None or (ts - prev_ts) > gap_ms:
+            bursts.append(current)
+            current = []
+        current.append(p)
+        prev_ts = ts
+    bursts.append(current)
+    return bursts
+
+def optical_flow_interpolate(img1, img2, n: int = 3):
+    """Return n frames interpolated between img1 and img2 using Farneback optical flow."""
+    import cv2
+    import numpy as np
+
+    # Resize img2 to match img1 if needed
+    if img1.shape != img2.shape:
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
+
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    flow = cv2.calcOpticalFlowFarneback(
+        gray1, gray2, None,
+        pyr_scale=0.5, levels=3, winsize=15,
+        iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+    )
+
+    h, w = img1.shape[:2]
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    results = []
+    for i in range(1, n + 1):
+        t = i / (n + 1)
+        map_x = x_coords + flow[..., 0] * t
+        map_y = y_coords + flow[..., 1] * t
+        warped = cv2.remap(img1, map_x, map_y, cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REPLICATE)
+        results.append(warped)
+    return results
+
+def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = 3) -> tuple[list[Path], Path | None]:
+    """
+    Returns (expanded_paths, tmp_dir).
+    Interpolated frames are written as JPEGs to tmp_dir.
+    tmp_dir is None if no frames were synthesized.
+    Hard cuts are preserved between bursts.
+    """
+    import cv2
+    import tempfile
+
+    bursts = group_into_bursts(frame_paths)
+    tmp_dir = Path(tempfile.mkdtemp())
+    expanded = []
+    idx = 0
+
+    for burst in bursts:
+        for j, path in enumerate(burst):
+            expanded.append(path)
+            if j < len(burst) - 1:
+                img1 = cv2.imread(str(path))
+                img2 = cv2.imread(str(burst[j + 1]))
+                if img1 is None or img2 is None:
+                    continue
+                interp_frames = optical_flow_interpolate(img1, img2, n_interp)
+                for k, frame in enumerate(interp_frames):
+                    out = tmp_dir / f"interp_{idx:06d}_{k:02d}.jpg"
+                    cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    expanded.append(out)
+                idx += 1
+
+    return expanded, tmp_dir
+
 def archive_existing(path: Path):
     """Rename an existing output file with a timestamp so it isn't overwritten."""
     if path.exists():
@@ -331,13 +418,17 @@ def archive_existing(path: Path):
         path.rename(archived)
         print(f"[*] Archived old video to {archived.name}")
 
-def make_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool):
+def make_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool,
+               optical_flow: bool = False):
     if fmt == "gif":
-        make_gif(photos_dir, output_dir, fps=fps, keep_old=keep_old)
+        make_gif(photos_dir, output_dir, fps=fps, keep_old=keep_old,
+                 optical_flow=optical_flow)
     else:
-        make_ffmpeg_video(photos_dir, output_dir, fmt=fmt, fps=fps, keep_old=keep_old)
+        make_ffmpeg_video(photos_dir, output_dir, fmt=fmt, fps=fps, keep_old=keep_old,
+                          optical_flow=optical_flow)
 
-def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool):
+def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
+             optical_flow: bool = False):
     try:
         from PIL import Image
     except ImportError:
@@ -348,6 +439,14 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool):
     if not frame_paths:
         print("[!] No images found for GIF.")
         return
+
+    tmp_dir = None
+    if optical_flow:
+        try:
+            frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
+            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s)")
+        except ImportError:
+            print("[!] opencv-python not installed. Run: pip install opencv-python")
 
     print(f"[*] Building GIF from {len(frame_paths)} frame(s) at {fps} fps …")
     duration_ms = 1000 // fps
@@ -360,6 +459,9 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool):
             frames.append(img)
         except Exception as e:
             print(f"  [!] Skipping {p.name}: {e}")
+
+    if tmp_dir:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not frames:
         print("[!] No frames could be loaded.")
@@ -380,7 +482,8 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool):
     size_mb = gif_path.stat().st_size / 1_048_576
     print(f"[*] Saved {gif_path} ({size_mb:.1f} MB)")
 
-def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool):
+def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool,
+                      optical_flow: bool = False):
     import subprocess
     import tempfile
 
@@ -392,6 +495,14 @@ def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, ke
     if not frame_paths:
         print("[!] No images found for video.")
         return
+
+    tmp_dir = None
+    if optical_flow:
+        try:
+            frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
+            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s)")
+        except ImportError:
+            print("[!] opencv-python not installed. Run: pip install opencv-python")
 
     print(f"[*] Building {fmt.upper()} from {len(frame_paths)} frame(s) at {fps} fps …")
 
@@ -423,6 +534,8 @@ def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, ke
         result = subprocess.run(cmd, capture_output=True, text=True)
     finally:
         os.unlink(flist_path)
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if result.returncode != 0:
         print(f"[!] ffmpeg failed:\n{result.stderr}")
@@ -481,8 +594,10 @@ def main():
                         help="Skip video creation")
     parser.add_argument("--format",    choices=["mp4", "webm", "gif"], default="mp4",
                         help="Output video format (default: mp4)")
-    parser.add_argument("--keep-old",  action="store_true",
+    parser.add_argument("--keep-old",     action="store_true",
                         help="Archive existing video with a timestamp instead of overwriting it")
+    parser.add_argument("--optical-flow", action="store_true",
+                        help="Interpolate frames within each burst using optical flow")
     args = parser.parse_args()
 
     email    = args.email    or input("Email: ")
@@ -496,6 +611,7 @@ def main():
         novideo=args.novideo,
         fmt=args.format,
         keep_old=args.keep_old,
+        optical_flow=args.optical_flow,
     ))
 
 

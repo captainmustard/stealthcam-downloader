@@ -32,6 +32,7 @@ You'll be prompted for your Stealth Cam Command email and password.
 | `--novideo` | off | Skip video creation |
 | `--format FORMAT` | `mp4` | Video format: `mp4`, `webm`, or `gif` |
 | `--keep-old` | off | Archive existing video with a timestamp instead of overwriting |
+| `--optical-flow` | off | Interpolate 3 synthetic frames between each shot within a burst using optical flow |
 
 ### Example
 
