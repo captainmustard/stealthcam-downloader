@@ -4,19 +4,15 @@ Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.c
 
 ## Requirements
 
-Python 3.10+ and ffmpeg:
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — manages Python and dependencies automatically
+- ffmpeg — `sudo pacman -S ffmpeg` / `sudo apt install ffmpeg` / `brew install ffmpeg`
 
-```bash
-pip install playwright httpx pillow
-playwright install chromium
-```
-
-ffmpeg must be on your PATH (`sudo pacman -S ffmpeg` / `sudo apt install ffmpeg` / `brew install ffmpeg`).
+All Python dependencies (playwright, httpx, pillow) and the Chromium browser are installed automatically on first run.
 
 ## Usage
 
 ```bash
-python3 download_trailcam.py
+uv run download_trailcam.py
 ```
 
 You'll be prompted for your Stealth Cam Command email and password.
@@ -38,7 +34,7 @@ You'll be prompted for your Stealth Cam Command email and password.
 ### Example
 
 ```bash
-python3 download_trailcam.py --output ~/TrailCam --headless --format mp4 --keep-old
+uv run download_trailcam.py --output ~/TrailCam --headless --format mp4 --keep-old
 ```
 
 ## Example output

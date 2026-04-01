@@ -1,12 +1,20 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "playwright",
+#   "httpx",
+#   "pillow",
+# ]
+# ///
 """
 Trail cam gallery downloader for stealthcamcommand.com
 Usage:
-    python3 download_trailcam.py
-    python3 download_trailcam.py --output ~/TrailCam --headless
-    python3 download_trailcam.py --novideo
-    python3 download_trailcam.py --format gif
-    python3 download_trailcam.py --keep-old
+    uv run download_trailcam.py
+    uv run download_trailcam.py --output ~/TrailCam --headless
+    uv run download_trailcam.py --novideo
+    uv run download_trailcam.py --format gif
+    uv run download_trailcam.py --keep-old
 """
 
 import asyncio
@@ -562,7 +570,19 @@ def extract_urls_from_json(obj, found: set, depth: int = 0):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def ensure_playwright_browser():
+    """Install Chromium browser if not already present."""
+    import subprocess
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as p:
+            p.chromium.launch().close()
+    except Exception:
+        print("[*] Installing Chromium for Playwright …")
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+
 def main():
+    ensure_playwright_browser()
     parser = argparse.ArgumentParser(description="Download trail cam photos from stealthcamcommand.com")
     parser.add_argument("--email",     help="Account email (prompted if omitted)")
     parser.add_argument("--password",  help="Account password (prompted if omitted)")
