@@ -33,7 +33,7 @@ You'll be prompted for your Stealth Cam Command email and password.
 | `--nophotos` | off | Skip downloading photos (useful for rebuilding the video from existing photos) |
 | `--format FORMAT` | `mp4` | Video format: `mp4`, `webm`, or `gif` |
 | `--keep-old` | off | Archive existing video with a timestamp instead of overwriting |
-| `--smoothing MODE` | off | Interpolate frames within each burst: `optical-flow` (pixel-accurate warp) or `crossfade` (dissolve blend) |
+| `--smoothing` | off | Crossfade between shots within each burst, holding each photo for 0.5s before transitioning |
 
 ### Example
 

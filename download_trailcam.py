@@ -350,67 +350,9 @@ def group_into_bursts(frame_paths: list[Path], gap_ms: int = 10_000) -> list[lis
     bursts.append(current)
     return bursts
 
-def optical_flow_interpolate(img1, img2, n: int = 3):
-    """Return n frames interpolated between img1 and img2 using Farneback optical flow."""
-    import cv2
-    import numpy as np
-
-    # Resize img2 to match img1 if needed
-    if img1.shape != img2.shape:
-        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
-
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-    flow = cv2.calcOpticalFlowFarneback(
-        gray1, gray2, None,
-        pyr_scale=0.5, levels=3, winsize=15,
-        iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
-    )
-
-    h, w = img1.shape[:2]
-    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
-    results = []
-    for i in range(1, n + 1):
-        t = i / (n + 1)
-        map_x = x_coords + flow[..., 0] * t
-        map_y = y_coords + flow[..., 1] * t
-        warped = cv2.remap(img1, map_x, map_y, cv2.INTER_LINEAR,
-                           borderMode=cv2.BORDER_REPLICATE)
-        results.append(warped)
-    return results
-
 N_INTERP = 3  # synthetic frames inserted between each real pair within a burst
 
 CROSSFADE_PAUSE_S = 0.5  # how long to hold each real photo before crossfading
-
-def expand_with_optical_flow(frame_paths: list[Path], fps: int,
-                              n_interp: int = N_INTERP) -> tuple[list[tuple[Path, float]], Path]:
-    """Expand with optical-flow-warped intermediate frames; all frames get equal duration."""
-    import cv2
-    import tempfile
-
-    frame_dur = 1 / (fps * (n_interp + 1))
-    bursts = group_into_bursts(frame_paths)
-    tmp_dir = Path(tempfile.mkdtemp())
-    expanded: list[tuple[Path, float]] = []
-    idx = 0
-
-    for burst in bursts:
-        for j, path in enumerate(burst):
-            expanded.append((path, frame_dur))
-            if j < len(burst) - 1:
-                img1 = cv2.imread(str(path))
-                img2 = cv2.imread(str(burst[j + 1]))
-                if img1 is None or img2 is None:
-                    continue
-                interp_frames = optical_flow_interpolate(img1, img2, n_interp)
-                for k, frame in enumerate(interp_frames):
-                    out = tmp_dir / f"interp_{idx:06d}_{k:02d}.jpg"
-                    cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    expanded.append((out, frame_dur))
-                idx += 1
-
-    return expanded, tmp_dir
 
 def expand_with_crossfade(frame_paths: list[Path], fps: int,
                           n_interp: int = N_INTERP) -> tuple[list[tuple[Path, float]], Path]:
@@ -443,13 +385,7 @@ def expand_with_crossfade(frame_paths: list[Path], fps: int,
 
 def expand_frames(frame_paths: list[Path], smoothing: str,
                   fps: int) -> tuple[list[tuple[Path, float]], Path | None]:
-    """Dispatch to the appropriate frame expansion method."""
-    if smoothing == "optical-flow":
-        try:
-            return expand_with_optical_flow(frame_paths, fps)
-        except ImportError:
-            print("[!] opencv-python not installed. Run: pip install opencv-python")
-    elif smoothing == "crossfade":
+    if smoothing == "crossfade":
         try:
             return expand_with_crossfade(frame_paths, fps)
         except ImportError:
@@ -642,10 +578,8 @@ def main():
                         help="Output video format (default: mp4)")
     parser.add_argument("--keep-old",  action="store_true",
                         help="Archive existing video with a timestamp instead of overwriting it")
-    parser.add_argument("--smoothing", choices=["optical-flow", "crossfade"], default=None,
-                        help="Smoothly interpolate between shots within each burst: "
-                             "'optical-flow' warps pixels along tracked motion; "
-                             "'crossfade' blends frames like a photo viewer transition")
+    parser.add_argument("--smoothing", action="store_true",
+                        help="Crossfade between shots within each burst")
     args = parser.parse_args()
 
     email    = args.email    or input("Email: ")
@@ -660,7 +594,7 @@ def main():
         nophotos=args.nophotos,
         fmt=args.format,
         keep_old=args.keep_old,
-        smoothing=args.smoothing,
+        smoothing="crossfade" if args.smoothing else None,
     ))
 
 
