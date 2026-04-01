@@ -135,14 +135,28 @@ async def scrape_gallery(page: Page, image_urls: set):
     await page.goto("https://stealthcamcommand.com/gallery", wait_until="networkidle")
 
     print("[*] Scrolling to load all images …")
-    prev_height = 0
-    for _ in range(50):
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    prev_count = 0
+    stable_rounds = 0
+    for _ in range(200):
+        # Scroll both the window and any scrollable inner containers
+        await page.evaluate("""
+            window.scrollTo(0, document.body.scrollHeight);
+            document.querySelectorAll('*').forEach(el => {
+                if (el.scrollHeight > el.clientHeight + 10) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            });
+        """)
         await asyncio.sleep(1.5)
-        height = await page.evaluate("document.body.scrollHeight")
-        if height == prev_height:
-            break
-        prev_height = height
+        count = len(await page.query_selector_all("img"))
+        if count == prev_count:
+            stable_rounds += 1
+            if stable_rounds >= 3:
+                break
+        else:
+            stable_rounds = 0
+        prev_count = count
+    print(f"[*] Detected {prev_count} image element(s) on page")
 
     for _ in range(30):
         found = False
@@ -295,9 +309,16 @@ def make_mp4(output_dir: Path, fps: int = 3):
         return
 
     photo_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+    def frame_sort_key(p: Path) -> str:
+        # Sort by the UUID stem (strip leading NNNN_ index), which is time-based
+        s = p.stem
+        return s.split("_", 1)[-1] if "_" in s else s
+
     frame_paths = sorted(
-        f for f in output_dir.iterdir()
-        if f.suffix.lower() in photo_exts and not f.name.startswith("_")
+        (f for f in output_dir.iterdir()
+         if f.suffix.lower() in photo_exts and not f.name.startswith("_")),
+        key=frame_sort_key,
     )
     if not frame_paths:
         print("[!] No images found for WebM.")
