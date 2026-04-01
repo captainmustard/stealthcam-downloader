@@ -381,19 +381,23 @@ def optical_flow_interpolate(img1, img2, n: int = 3):
 
 N_INTERP = 3  # synthetic frames inserted between each real pair within a burst
 
-def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path]:
-    """Expand frame list with optical-flow-warped intermediate frames within each burst."""
+CROSSFADE_PAUSE_S = 0.5  # how long to hold each real photo before crossfading
+
+def expand_with_optical_flow(frame_paths: list[Path], fps: int,
+                              n_interp: int = N_INTERP) -> tuple[list[tuple[Path, float]], Path]:
+    """Expand with optical-flow-warped intermediate frames; all frames get equal duration."""
     import cv2
     import tempfile
 
+    frame_dur = 1 / (fps * (n_interp + 1))
     bursts = group_into_bursts(frame_paths)
     tmp_dir = Path(tempfile.mkdtemp())
-    expanded = []
+    expanded: list[tuple[Path, float]] = []
     idx = 0
 
     for burst in bursts:
         for j, path in enumerate(burst):
-            expanded.append(path)
+            expanded.append((path, frame_dur))
             if j < len(burst) - 1:
                 img1 = cv2.imread(str(path))
                 img2 = cv2.imread(str(burst[j + 1]))
@@ -403,24 +407,27 @@ def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) 
                 for k, frame in enumerate(interp_frames):
                     out = tmp_dir / f"interp_{idx:06d}_{k:02d}.jpg"
                     cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    expanded.append(out)
+                    expanded.append((out, frame_dur))
                 idx += 1
 
     return expanded, tmp_dir
 
-def expand_with_crossfade(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path]:
-    """Expand frame list with crossfade-blended intermediate frames within each burst."""
+def expand_with_crossfade(frame_paths: list[Path], fps: int,
+                          n_interp: int = N_INTERP) -> tuple[list[tuple[Path, float]], Path]:
+    """Expand with crossfade-blended frames; real photos pause before transitioning."""
     from PIL import Image
     import tempfile
 
+    interp_dur = 1 / (fps * (n_interp + 1))
     bursts = group_into_bursts(frame_paths)
     tmp_dir = Path(tempfile.mkdtemp())
-    expanded = []
+    expanded: list[tuple[Path, float]] = []
     idx = 0
 
     for burst in bursts:
         for j, path in enumerate(burst):
-            expanded.append(path)
+            # Real photo: hold for the pause duration
+            expanded.append((path, CROSSFADE_PAUSE_S))
             if j < len(burst) - 1:
                 img1 = Image.open(path).convert("RGB")
                 img2 = Image.open(burst[j + 1]).convert("RGB").resize(img1.size, Image.LANCZOS)
@@ -429,26 +436,25 @@ def expand_with_crossfade(frame_paths: list[Path], n_interp: int = N_INTERP) -> 
                     blended = Image.blend(img1, img2, t)
                     out = tmp_dir / f"interp_{idx:06d}_{k:02d}.jpg"
                     blended.save(str(out), "JPEG", quality=95)
-                    expanded.append(out)
+                    expanded.append((out, interp_dur))
                 idx += 1
 
     return expanded, tmp_dir
 
-def expand_frames(frame_paths: list[Path], smoothing: str) -> tuple[list[Path], Path | None]:
+def expand_frames(frame_paths: list[Path], smoothing: str,
+                  fps: int) -> tuple[list[tuple[Path, float]], Path | None]:
     """Dispatch to the appropriate frame expansion method."""
     if smoothing == "optical-flow":
         try:
-            return expand_with_optical_flow(frame_paths)
+            return expand_with_optical_flow(frame_paths, fps)
         except ImportError:
             print("[!] opencv-python not installed. Run: pip install opencv-python")
-            return frame_paths, None
     elif smoothing == "crossfade":
         try:
-            return expand_with_crossfade(frame_paths)
+            return expand_with_crossfade(frame_paths, fps)
         except ImportError:
             print("[!] Pillow not installed. Run: pip install pillow")
-            return frame_paths, None
-    return frame_paths, None
+    return [(p, 1 / fps) for p in frame_paths], None
 
 def archive_existing(path: Path):
     """Rename an existing output file with a timestamp so it isn't overwritten."""
@@ -474,26 +480,28 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
         print("[!] Pillow not installed. Run: pip install pillow")
         return
 
-    frame_paths = get_frame_paths(photos_dir)
-    if not frame_paths:
+    raw_paths = get_frame_paths(photos_dir)
+    if not raw_paths:
         print("[!] No images found for GIF.")
         return
 
-    tmp_dir = None
     if smoothing:
-        frame_paths, tmp_dir = expand_frames(frame_paths, smoothing)
-        fps = fps * (N_INTERP + 1)
-        print(f"[*] {smoothing} expanded to {len(frame_paths)} frame(s) at {fps} fps")
+        sequence, tmp_dir = expand_frames(raw_paths, smoothing, fps)
+        print(f"[*] {smoothing} expanded to {len(sequence)} frame(s)")
+    else:
+        sequence = [(p, 1 / fps) for p in raw_paths]
+        tmp_dir = None
 
-    print(f"[*] Building GIF from {len(frame_paths)} frame(s) at {fps} fps …")
-    duration_ms = 1000 // fps
+    print(f"[*] Building GIF from {len(sequence)} frame(s) …")
 
     frames = []
-    for p in frame_paths:
+    durations_ms = []
+    for p, dur in sequence:
         try:
             img = Image.open(p).convert("RGB")
             img.thumbnail((1280, 960), Image.LANCZOS)
             frames.append(img)
+            durations_ms.append(int(dur * 1000))
         except Exception as e:
             print(f"  [!] Skipping {p.name}: {e}")
 
@@ -513,7 +521,7 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
         format="GIF",
         save_all=True,
         append_images=frames[1:],
-        duration=duration_ms,
+        duration=durations_ms,
         loop=0,
     )
     size_mb = gif_path.stat().st_size / 1_048_576
@@ -528,24 +536,25 @@ def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, ke
         print("[!] ffmpeg not found. Install it or use --novideo.")
         return
 
-    frame_paths = get_frame_paths(photos_dir)
-    if not frame_paths:
+    raw_paths = get_frame_paths(photos_dir)
+    if not raw_paths:
         print("[!] No images found for video.")
         return
 
-    tmp_dir = None
     if smoothing:
-        frame_paths, tmp_dir = expand_frames(frame_paths, smoothing)
-        fps = fps * (N_INTERP + 1)
-        print(f"[*] {smoothing} expanded to {len(frame_paths)} frame(s) at {fps} fps")
+        sequence, tmp_dir = expand_frames(raw_paths, smoothing, fps)
+        print(f"[*] {smoothing} expanded to {len(sequence)} frame(s)")
+    else:
+        sequence = [(p, 1 / fps) for p in raw_paths]
+        tmp_dir = None
 
-    print(f"[*] Building {fmt.upper()} from {len(frame_paths)} frame(s) at {fps} fps …")
+    print(f"[*] Building {fmt.upper()} from {len(sequence)} frame(s) …")
 
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as flist:
-        for p in frame_paths:
+        for p, dur in sequence:
             safe_path = str(p.resolve()).replace("'", "'\\''")
             flist.write(f"file '{safe_path}'\n")
-            flist.write(f"duration {1/fps:.6f}\n")
+            flist.write(f"duration {dur:.6f}\n")
         flist_path = flist.name
 
     out_path = output_dir / f"trailcam.{fmt}"
