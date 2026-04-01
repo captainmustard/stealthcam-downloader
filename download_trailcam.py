@@ -378,7 +378,9 @@ def optical_flow_interpolate(img1, img2, n: int = 3):
         results.append(warped)
     return results
 
-def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = 3) -> tuple[list[Path], Path | None]:
+N_INTERP = 3  # synthetic frames inserted between each real pair within a burst
+
+def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path | None]:
     """
     Returns (expanded_paths, tmp_dir).
     Interpolated frames are written as JPEGs to tmp_dir.
@@ -444,7 +446,8 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
     if optical_flow:
         try:
             frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
-            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s)")
+            fps = fps * (N_INTERP + 1)
+            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s) at {fps} fps")
         except ImportError:
             print("[!] opencv-python not installed. Run: pip install opencv-python")
 
@@ -500,7 +503,8 @@ def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, ke
     if optical_flow:
         try:
             frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
-            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s)")
+            fps = fps * (N_INTERP + 1)
+            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s) at {fps} fps")
         except ImportError:
             print("[!] opencv-python not installed. Run: pip install opencv-python")
 
