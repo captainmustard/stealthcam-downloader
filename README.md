@@ -7,7 +7,13 @@ Downloads all photos from your [Stealth Cam Command](https://stealthcamcommand.c
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — manages Python and dependencies automatically
 - ffmpeg — `sudo pacman -S ffmpeg` / `sudo apt install ffmpeg` / `brew install ffmpeg`
 
-All Python dependencies (playwright, httpx, pillow) and the Chromium browser are installed automatically on first run.
+## Setup
+
+```bash
+uv sync
+```
+
+This creates a `.venv` in the project directory and installs all dependencies. The Chromium browser is installed automatically on first run.
 
 ## Usage
 

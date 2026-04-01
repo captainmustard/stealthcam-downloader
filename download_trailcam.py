@@ -1,12 +1,4 @@
 #!/usr/bin/env -S uv run
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#   "playwright",
-#   "httpx",
-#   "pillow",
-# ]
-# ///
 """
 Trail cam gallery downloader for stealthcamcommand.com
 Usage:
