@@ -209,7 +209,7 @@ async def download_worker(semaphore, url, dest, filename, index, total, client, 
 # ── main ─────────────────────────────────────────────────────────────────────
 
 async def run(email: str, password: str, output_dir: Path, headless: bool,
-              novideo: bool, fmt: str, keep_old: bool, optical_flow: bool):
+              novideo: bool, fmt: str, keep_old: bool, smoothing: str | None):
     output_dir.mkdir(parents=True, exist_ok=True)
     photos_dir = output_dir / "photos"
     photos_dir.mkdir(exist_ok=True)
@@ -305,7 +305,7 @@ async def run(email: str, password: str, output_dir: Path, headless: bool,
 
     if not novideo:
         make_video(photos_dir, output_dir, fmt=fmt, fps=3, keep_old=keep_old,
-                   optical_flow=optical_flow)
+                   smoothing=smoothing)
 
 
 # ── video export ──────────────────────────────────────────────────────────────
@@ -380,13 +380,8 @@ def optical_flow_interpolate(img1, img2, n: int = 3):
 
 N_INTERP = 3  # synthetic frames inserted between each real pair within a burst
 
-def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path | None]:
-    """
-    Returns (expanded_paths, tmp_dir).
-    Interpolated frames are written as JPEGs to tmp_dir.
-    tmp_dir is None if no frames were synthesized.
-    Hard cuts are preserved between bursts.
-    """
+def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path]:
+    """Expand frame list with optical-flow-warped intermediate frames within each burst."""
     import cv2
     import tempfile
 
@@ -412,6 +407,48 @@ def expand_with_optical_flow(frame_paths: list[Path], n_interp: int = N_INTERP) 
 
     return expanded, tmp_dir
 
+def expand_with_crossfade(frame_paths: list[Path], n_interp: int = N_INTERP) -> tuple[list[Path], Path]:
+    """Expand frame list with crossfade-blended intermediate frames within each burst."""
+    from PIL import Image
+    import tempfile
+
+    bursts = group_into_bursts(frame_paths)
+    tmp_dir = Path(tempfile.mkdtemp())
+    expanded = []
+    idx = 0
+
+    for burst in bursts:
+        for j, path in enumerate(burst):
+            expanded.append(path)
+            if j < len(burst) - 1:
+                img1 = Image.open(path).convert("RGB")
+                img2 = Image.open(burst[j + 1]).convert("RGB").resize(img1.size, Image.LANCZOS)
+                for k in range(n_interp):
+                    t = (k + 1) / (n_interp + 1)
+                    blended = Image.blend(img1, img2, t)
+                    out = tmp_dir / f"interp_{idx:06d}_{k:02d}.jpg"
+                    blended.save(str(out), "JPEG", quality=95)
+                    expanded.append(out)
+                idx += 1
+
+    return expanded, tmp_dir
+
+def expand_frames(frame_paths: list[Path], smoothing: str) -> tuple[list[Path], Path | None]:
+    """Dispatch to the appropriate frame expansion method."""
+    if smoothing == "optical-flow":
+        try:
+            return expand_with_optical_flow(frame_paths)
+        except ImportError:
+            print("[!] opencv-python not installed. Run: pip install opencv-python")
+            return frame_paths, None
+    elif smoothing == "crossfade":
+        try:
+            return expand_with_crossfade(frame_paths)
+        except ImportError:
+            print("[!] Pillow not installed. Run: pip install pillow")
+            return frame_paths, None
+    return frame_paths, None
+
 def archive_existing(path: Path):
     """Rename an existing output file with a timestamp so it isn't overwritten."""
     if path.exists():
@@ -421,16 +458,15 @@ def archive_existing(path: Path):
         print(f"[*] Archived old video to {archived.name}")
 
 def make_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool,
-               optical_flow: bool = False):
+               smoothing: str | None = None):
     if fmt == "gif":
-        make_gif(photos_dir, output_dir, fps=fps, keep_old=keep_old,
-                 optical_flow=optical_flow)
+        make_gif(photos_dir, output_dir, fps=fps, keep_old=keep_old, smoothing=smoothing)
     else:
         make_ffmpeg_video(photos_dir, output_dir, fmt=fmt, fps=fps, keep_old=keep_old,
-                          optical_flow=optical_flow)
+                          smoothing=smoothing)
 
 def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
-             optical_flow: bool = False):
+             smoothing: str | None = None):
     try:
         from PIL import Image
     except ImportError:
@@ -443,13 +479,10 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
         return
 
     tmp_dir = None
-    if optical_flow:
-        try:
-            frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
-            fps = fps * (N_INTERP + 1)
-            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s) at {fps} fps")
-        except ImportError:
-            print("[!] opencv-python not installed. Run: pip install opencv-python")
+    if smoothing:
+        frame_paths, tmp_dir = expand_frames(frame_paths, smoothing)
+        fps = fps * (N_INTERP + 1)
+        print(f"[*] {smoothing} expanded to {len(frame_paths)} frame(s) at {fps} fps")
 
     print(f"[*] Building GIF from {len(frame_paths)} frame(s) at {fps} fps …")
     duration_ms = 1000 // fps
@@ -486,7 +519,7 @@ def make_gif(photos_dir: Path, output_dir: Path, fps: int, keep_old: bool,
     print(f"[*] Saved {gif_path} ({size_mb:.1f} MB)")
 
 def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, keep_old: bool,
-                      optical_flow: bool = False):
+                      smoothing: str | None = None):
     import subprocess
     import tempfile
 
@@ -500,13 +533,10 @@ def make_ffmpeg_video(photos_dir: Path, output_dir: Path, fmt: str, fps: int, ke
         return
 
     tmp_dir = None
-    if optical_flow:
-        try:
-            frame_paths, tmp_dir = expand_with_optical_flow(frame_paths)
-            fps = fps * (N_INTERP + 1)
-            print(f"[*] Optical flow expanded to {len(frame_paths)} frame(s) at {fps} fps")
-        except ImportError:
-            print("[!] opencv-python not installed. Run: pip install opencv-python")
+    if smoothing:
+        frame_paths, tmp_dir = expand_frames(frame_paths, smoothing)
+        fps = fps * (N_INTERP + 1)
+        print(f"[*] {smoothing} expanded to {len(frame_paths)} frame(s) at {fps} fps")
 
     print(f"[*] Building {fmt.upper()} from {len(frame_paths)} frame(s) at {fps} fps …")
 
@@ -598,10 +628,12 @@ def main():
                         help="Skip video creation")
     parser.add_argument("--format",    choices=["mp4", "webm", "gif"], default="mp4",
                         help="Output video format (default: mp4)")
-    parser.add_argument("--keep-old",     action="store_true",
+    parser.add_argument("--keep-old",  action="store_true",
                         help="Archive existing video with a timestamp instead of overwriting it")
-    parser.add_argument("--optical-flow", action="store_true",
-                        help="Interpolate frames within each burst using optical flow")
+    parser.add_argument("--smoothing", choices=["optical-flow", "crossfade"], default=None,
+                        help="Smoothly interpolate between shots within each burst: "
+                             "'optical-flow' warps pixels along tracked motion; "
+                             "'crossfade' blends frames like a photo viewer transition")
     args = parser.parse_args()
 
     email    = args.email    or input("Email: ")
@@ -615,7 +647,7 @@ def main():
         novideo=args.novideo,
         fmt=args.format,
         keep_old=args.keep_old,
-        optical_flow=args.optical_flow,
+        smoothing=args.smoothing,
     ))
 
 
